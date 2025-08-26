@@ -1,5 +1,8 @@
 const express = require("express");
 const cors = require("cors");
+const multer = require('multer');
+const axios = require('axios');
+const FormData = require('form-data');
 const admin = require("firebase-admin");
 const serviceAccount = require("./fireBaseToken.json");
 require("dotenv").config();
@@ -7,6 +10,10 @@ const { MongoClient, ServerApiVersion } = require("mongodb");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+//imageUpload
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
 // Middleware
 app.use(cors());
@@ -31,29 +38,6 @@ admin.initializeApp({
 });
 
 // Middleware to check for a valid access token
-const verifyToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "No token provided" });
-  }
-  const token = authHeader.split(" ")[1];
-  try {
-    const decoded = await admin.auth().verifyIdToken(token);
-    req.decoded = decoded
-    next();
-  } catch (err) {
-    return res.send(401).send({ message: "unauthorized Access" });
-  }
-};
-const verifyAdmin = async(req,res,next)=>{
-  const adminEmail = req.decoded.email
-  if(adminEmail){
-    
-    const userFromDb =usersCollection.find({email:adminEmail})
-    
-  }
-
-}
 
 async function run() {
   try {
@@ -76,6 +60,52 @@ async function run() {
     const tasksCollection = db.collection("tasks");
     const messagesCollection = db.collection("messages");
     const coursesCollection = db.collection("courses");
+    // ------------------- Token Verify ------------------
+    //verify fb Token
+    const verifyToken = async (req, res, next) => {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "No token provided" });
+      }
+      const token = authHeader.split(" ")[1];
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+        next();
+      } catch (err) {
+        return res.send(401).send({ message: "unauthorized Access" });
+      }
+    };
+    //verify admin
+    const verifyAdmin = async (req, res, next) => {
+      const adminEmail = req.decoded.email;
+
+      if (adminEmail) {
+        const userFromDb = await usersCollection.findOne({ email: adminEmail });
+        if (userFromDb.role === "admin") {
+          next();
+        } else {
+          return res
+            .status(403)
+            .send({ message: "Forbidden: Requires administrator access." });
+        }
+      }
+    };
+    //verify member
+    const verifyMember = async (req, res, next) => {
+      const adminEmail = req.decoded.email;
+
+      if (adminEmail) {
+        const userFromDb = await usersCollection.findOne({ email: adminEmail });
+        if (userFromDb.role === "member") {
+          next();
+        }
+      } else {
+        return res
+          .status(403)
+          .send({ message: "Forbidden: Requires member access." });
+      }
+    };
 
     // ------------------- ROUTES -------------------
 
@@ -161,7 +191,7 @@ async function run() {
     });
 
     //get user info from db to show in the branch list
-    app.get("/allUserInfo", verifyToken,verifyAdmin, async (req, res) => {
+    app.get("/allUserInfo", verifyToken, verifyAdmin, async (req, res) => {
       const result = await usersCollection.find().toArray();
       res.send(result);
     });
@@ -175,6 +205,69 @@ async function run() {
       const count = await coursesCollection.estimatedDocumentCount();
       res.send({ count });
     });
+    // get currently logged in user info
+    app.get("/currentUserInfo", async (req, res) => {
+      const userEmail = req.query.email;
+      console.log(userEmail);
+      try {
+        const currentUserData = await usersCollection.findOne({
+          email: userEmail,
+        });
+
+        const data = { currentUserData };
+        if (currentUserData) {
+          res.status(200).send(data);
+        } else {
+          res.status(200).send({});
+        }
+      } catch (error) {
+        console.error("Error fetching user agreement:", error);
+        res
+          .status(500)
+          .send({ message: "Server error fetching user agreement." });
+      }
+    });
+    //upload image to imageBB (DO NOT TOUCH)
+    app.post("/upload-to-imgbb", upload.single("image"), async (req, res) => {
+      try {
+        const apiKey = process.env.IMGBB_API_KEY;
+        if (!apiKey) {
+          return res
+            .status(500)
+            .json({ error: "ImageBB API key is not configured." });
+        }
+
+        const file = req.file;
+        if (!file) {
+          return res.status(400).json({ error: "No image file provided." });
+        }
+        const formData = new FormData();
+        formData.append("image", file.buffer, { filename: file.originalname });
+        const imgbbResponse = await axios.post(
+          `https://api.imgbb.com/1/upload?key=${apiKey}`,
+          formData,
+          {
+            headers: {
+              ...formData.getHeaders(),
+            },
+          }
+        );
+
+        const imageUrl = imgbbResponse.data.data.url;
+        res.status(200).json({ imageUrl }); 
+      } catch (error) {
+        res
+          .status(500)
+          .json({ error: "Failed to upload image. Please try again later." });
+      }
+    });
+    //add course to the all course in db
+    app.post('/addCourse',async(req,res)=>{
+      const courseData = req.body
+      console.log(courseData);
+      const result = await coursesCollection.insertOne(courseData)
+      res.status(201).json({ message: 'Course added successfully!', course: result });
+    })
 
     app.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
